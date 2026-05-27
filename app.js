@@ -17,6 +17,10 @@ const resetPieces = document.querySelector("#resetPieces");
 const autoImportPieces = document.querySelector("#autoImportPieces");
 const playModeButton = document.querySelector("#playModeButton");
 const exitPlayModeButton = document.querySelector("#exitPlayModeButton");
+const exportJsonButton = document.querySelector("#exportJsonButton");
+const importJsonInput = document.querySelector("#importJsonInput");
+const expandBoardButton = document.querySelector("#expandBoardButton");
+const refreshBoardButton = document.querySelector("#refreshBoardButton");
 const importAllImages = document.querySelector("#importAllImages");
 const clearImages = document.querySelector("#clearImages");
 
@@ -28,7 +32,18 @@ let activeZ = 1;
 let sourceCount = 0;
 let isPlayMode = false;
 let isResolving = false;
+let playSnapshot = null;
+let playSession = 0;
+let topRowLocked = true;
 const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+function isTopRowLockedActive() {
+  return isPlayMode && topRowLocked;
+}
+
+function isTopRowConnectionBlocked(...piecesToCheck) {
+  return topRowLocked && piecesToCheck.some((piece) => Number(piece.dataset.boardRow) === 0);
+}
 
 function updateLibraryEmptyState() {
   const empty = imageLibrary.querySelector(".empty");
@@ -49,30 +64,31 @@ function updatePiecesEmptyState() {
 }
 
 function getBestGrid(width, height) {
+  const allowedGrids = [
+    { cols: 1, rows: 2 },
+    { cols: 2, rows: 1 },
+    { cols: 2, rows: 2 },
+    { cols: 2, rows: 3 },
+    { cols: 3, rows: 2 },
+  ];
   const exactCols = width / PIECE_W;
   const exactRows = height / PIECE_H;
-  if (
-    Number.isInteger(exactCols) &&
-    Number.isInteger(exactRows) &&
-    exactCols >= 1 &&
-    exactRows >= 1 &&
-    exactCols <= BOARD_COLS &&
-    exactRows <= BOARD_ROWS
-  ) {
+  const exactAllowedGrid = allowedGrids.find(
+    (grid) => grid.cols === exactCols && grid.rows === exactRows
+  );
+  if (Number.isInteger(exactCols) && Number.isInteger(exactRows) && exactAllowedGrid) {
     return { cols: exactCols, rows: exactRows, reason: "exact" };
   }
 
   const ratio = width / height;
   let best = { cols: 1, rows: 1, score: Infinity };
 
-  for (let cols = 1; cols <= BOARD_COLS; cols++) {
-    for (let rows = 1; rows <= BOARD_ROWS; rows++) {
-      const gridRatio = (cols * PIECE_W) / (rows * PIECE_H);
-      const ratioScore = Math.abs(Math.log(gridRatio / ratio));
-      const sizeScore = cols * rows * 0.015;
-      const score = ratioScore + sizeScore;
-      if (score < best.score) best = { cols, rows, score, reason: "ratio" };
-    }
+  for (const { cols, rows } of allowedGrids) {
+    const gridRatio = (cols * PIECE_W) / (rows * PIECE_H);
+    const ratioScore = Math.abs(Math.log(gridRatio / ratio));
+    const sizeScore = cols * rows * 0.015;
+    const score = ratioScore + sizeScore;
+    if (score < best.score) best = { cols, rows, score, reason: "ratio" };
   }
 
   return best;
@@ -293,21 +309,39 @@ function cleanSourceGridLines(ctx, width, height, cols, rows) {
 function startDrag(event) {
   const piece = event.currentTarget;
   if (isPlayMode && piece.parentElement !== board) return;
+  if (isTopRowLockedActive() && piece.parentElement === board && Number(piece.dataset.boardRow) === 0) return;
   piece.setPointerCapture(event.pointerId);
   const rect = piece.getBoundingClientRect();
   const startCell = piece.parentElement === board ? getBoardCell(piece) : null;
+  const groupPieces = isPlayMode && piece.parentElement === board ? getConnectedPieceGroup(piece) : [piece];
+  const groupItems = groupPieces.map((groupPiece) => {
+    const groupRect = groupPiece.getBoundingClientRect();
+    return {
+      piece: groupPiece,
+      offsetX: event.clientX - groupRect.left,
+      offsetY: event.clientY - groupRect.top,
+      startCell: getBoardCell(groupPiece),
+      startParent: groupPiece.parentElement,
+      startNextSibling: groupPiece.nextElementSibling,
+    };
+  });
   dragState = {
     piece,
+    groupItems,
     pointerId: event.pointerId,
     offsetX: event.clientX - rect.left,
     offsetY: event.clientY - rect.top,
     scale: getBoardScale(),
     fromBoard: piece.parentElement === board,
     startCell,
+    startParent: piece.parentElement,
+    startNextSibling: piece.nextElementSibling,
   };
-  document.body.appendChild(piece);
-  piece.classList.add("dragging");
-  piece.style.zIndex = String(++activeZ);
+  for (const item of groupItems) {
+    document.body.appendChild(item.piece);
+    item.piece.classList.add("dragging");
+    item.piece.style.zIndex = String(++activeZ);
+  }
   moveDraggingPiece(event.clientX, event.clientY);
   document.addEventListener("pointermove", dragMove);
   document.addEventListener("pointerup", endDrag, { once: true });
@@ -326,17 +360,20 @@ function dragMove(event) {
 }
 
 function moveDraggingPiece(clientX, clientY) {
-  const { piece, offsetX, offsetY, scale } = dragState;
+  const { scale } = dragState;
   const dragW = PIECE_W * scale;
   const dragH = PIECE_H * scale;
-  piece.style.width = `${dragW}px`;
-  piece.style.height = `${dragH}px`;
-  piece.style.backgroundSize = `${Number(piece.style.getPropertyValue("--source-w").replace("px", "")) * scale}px ${Number(piece.style.getPropertyValue("--source-h").replace("px", "")) * scale}px`;
-  piece.style.backgroundPosition = `${Number(piece.style.getPropertyValue("--bg-x").replace("px", "")) * scale}px ${Number(piece.style.getPropertyValue("--bg-y").replace("px", "")) * scale}px`;
-  piece.style.left = `${clientX - offsetX}px`;
-  piece.style.top = `${clientY - offsetY}px`;
-  piece.style.removeProperty("--x");
-  piece.style.removeProperty("--y");
+  for (const item of dragState.groupItems) {
+    const piece = item.piece;
+    piece.style.width = `${dragW}px`;
+    piece.style.height = `${dragH}px`;
+    piece.style.backgroundSize = `${Number(piece.style.getPropertyValue("--source-w").replace("px", "")) * scale}px ${Number(piece.style.getPropertyValue("--source-h").replace("px", "")) * scale}px`;
+    piece.style.backgroundPosition = `${Number(piece.style.getPropertyValue("--bg-x").replace("px", "")) * scale}px ${Number(piece.style.getPropertyValue("--bg-y").replace("px", "")) * scale}px`;
+    piece.style.left = `${clientX - item.offsetX}px`;
+    piece.style.top = `${clientY - item.offsetY}px`;
+    piece.style.removeProperty("--x");
+    piece.style.removeProperty("--y");
+  }
 }
 
 function endDrag(event) {
@@ -359,11 +396,21 @@ function endDrag(event) {
   if (insideQueue) {
     placeInQueue(piece, event.clientY);
   } else if (insideBoard) {
+    if (isPlayMode && dragState.groupItems.length > 1) {
+      if (!tryPlaceDraggedGroup(event, boardRect)) restoreDraggedGroup();
+      finishDrag(piece);
+      return;
+    }
     const scale = dragState.scale;
     const currentX = (event.clientX - boardRect.left - dragState.offsetX) / scale;
     const currentY = (event.clientY - boardRect.top - dragState.offsetY) / scale;
     const col = Math.max(0, Math.min(BOARD_COLS - 1, Math.round(currentX / PIECE_W)));
     const row = Math.max(0, Math.min(BOARD_ROWS - 1, Math.round(currentY / PIECE_H)));
+    if (isTopRowLockedActive() && row === 0) {
+      restoreDraggedPiece(piece);
+      finishDrag(piece);
+      return;
+    }
     const occupyingPiece = findPieceAt(col, row, piece);
 
     if (occupyingPiece && dragState.fromBoard && dragState.startCell) {
@@ -374,19 +421,108 @@ function endDrag(event) {
 
     placeOnBoard(piece, col, row);
   } else if (!isPlayMode) {
-    returnToTray(piece);
+    restoreDraggedPiece(piece);
   } else if (dragState.startCell) {
-    placeOnBoard(piece, dragState.startCell.col, dragState.startCell.row);
+    restoreDraggedGroup();
   }
 
-  piece.classList.remove("dragging");
-  restorePieceSize(piece);
+  finishDrag(piece);
+}
+
+function finishDrag(piece) {
+  for (const item of dragState.groupItems) {
+    item.piece.classList.remove("dragging");
+    restorePieceSize(item.piece);
+  }
   pieceQueue.classList.remove("queue-ready");
   document.removeEventListener("pointermove", dragMove);
   dragState = null;
   updateConnectedBorders();
   if (isPlayMode) resolveCompletedPuzzles();
   updateStats();
+}
+
+function restoreDraggedPiece(piece) {
+  if (dragState.startCell) {
+    placeOnBoard(piece, dragState.startCell.col, dragState.startCell.row);
+    return;
+  }
+  if (dragState.startParent === pieceQueue) {
+    pieceQueue.insertBefore(piece, dragState.startNextSibling);
+    piece.style.removeProperty("left");
+    piece.style.removeProperty("top");
+    piece.style.removeProperty("--x");
+    piece.style.removeProperty("--y");
+    piece.dataset.home = "queue";
+    resetPieceBorders(piece);
+    return;
+  }
+  returnToTray(piece);
+}
+
+function restoreDraggedGroup() {
+  for (const item of dragState.groupItems) {
+    if (item.startCell) {
+      placeOnBoard(item.piece, item.startCell.col, item.startCell.row);
+    } else if (item.startParent === pieceQueue) {
+      pieceQueue.insertBefore(item.piece, item.startNextSibling);
+      item.piece.style.removeProperty("left");
+      item.piece.style.removeProperty("top");
+      item.piece.style.removeProperty("--x");
+      item.piece.style.removeProperty("--y");
+      item.piece.dataset.home = "queue";
+      resetPieceBorders(item.piece);
+    } else {
+      returnToTray(item.piece);
+    }
+  }
+}
+
+function tryPlaceDraggedGroup(event, boardRect) {
+  const scale = dragState.scale;
+  const activeStart = dragState.startCell;
+  const currentX = (event.clientX - boardRect.left - dragState.offsetX) / scale;
+  const currentY = (event.clientY - boardRect.top - dragState.offsetY) / scale;
+  const targetCol = Math.max(0, Math.min(BOARD_COLS - 1, Math.round(currentX / PIECE_W)));
+  const targetRow = Math.max(0, Math.min(BOARD_ROWS - 1, Math.round(currentY / PIECE_H)));
+  const groupSet = new Set(dragState.groupItems.map((item) => item.piece));
+  const targets = dragState.groupItems.map((item) => {
+    const dCol = item.startCell.col - activeStart.col;
+    const dRow = item.startCell.row - activeStart.row;
+    return {
+      piece: item.piece,
+      col: targetCol + dCol,
+      row: targetRow + dRow,
+    };
+  });
+
+  const isValid = targets.every((target) => {
+    if (target.col < 0 || target.col >= BOARD_COLS || target.row < 0 || target.row >= BOARD_ROWS) return false;
+    if (isTopRowLockedActive() && target.row === 0) return false;
+    return true;
+  });
+
+  if (!isValid) return false;
+  const displaced = [];
+  const targetCells = new Set(targets.map((target) => `${target.col}:${target.row}`));
+  const openStartCells = dragState.groupItems
+    .map((item) => item.startCell)
+    .filter((cell) => !targetCells.has(`${cell.col}:${cell.row}`));
+
+  for (const target of targets) {
+    const occupyingPiece = findPieceAt(target.col, target.row, target.piece);
+    if (occupyingPiece && !groupSet.has(occupyingPiece) && !displaced.includes(occupyingPiece)) {
+      displaced.push(occupyingPiece);
+    }
+  }
+
+  if (displaced.length > openStartCells.length) return false;
+  for (const target of targets) placeOnBoard(target.piece, target.col, target.row);
+  displaced.forEach((displacedPiece, index) => {
+    const cell = openStartCells[index];
+    placeOnBoard(displacedPiece, cell.col, cell.row);
+  });
+  return true;
 }
 
 function getBoardScale() {
@@ -465,7 +601,7 @@ function getQueueInsertBefore(pointerY, draggingPiece) {
 }
 
 function autoImportTrayPieces() {
-  const trayPieces = [...tray.querySelectorAll(".piece")];
+  const trayPieces = shuffle([...tray.querySelectorAll(".piece")]);
   for (const piece of trayPieces) {
     const emptyCell = findFirstEmptyCell();
     if (emptyCell) {
@@ -479,25 +615,157 @@ function autoImportTrayPieces() {
   updatePiecesEmptyState();
 }
 
+function expandBoard() {
+  topRowLocked = false;
+  board.classList.add("expanded");
+  updateConnectedBorders();
+}
+
+function refreshBoard() {
+  const looseBoardPieces = [...board.querySelectorAll(".piece")].filter((piece) => !hasAnyCorrectNeighbor(piece));
+  const queuePieces = [...pieceQueue.querySelectorAll(".piece")];
+  const refreshPieces = shuffle([...looseBoardPieces, ...queuePieces]);
+  const anchoredPieces = new Set([...board.querySelectorAll(".piece")].filter((piece) => !looseBoardPieces.includes(piece)));
+
+  for (const piece of refreshPieces) {
+    piece.style.removeProperty("left");
+    piece.style.removeProperty("top");
+    piece.style.removeProperty("--x");
+    piece.style.removeProperty("--y");
+    delete piece.dataset.boardCol;
+    delete piece.dataset.boardRow;
+    piece.dataset.home = "queue";
+  }
+
+  const openCells = [];
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    if (isTopRowLockedActive() && row === 0) continue;
+    for (let col = 0; col < BOARD_COLS; col++) {
+      const occupied = [...anchoredPieces].some(
+        (piece) => Number(piece.dataset.boardCol) === col && Number(piece.dataset.boardRow) === row
+      );
+      if (!occupied) openCells.push({ col, row });
+    }
+  }
+  shuffle(openCells);
+
+  pieceQueue.innerHTML = "";
+  for (const piece of refreshPieces) {
+    const cell = openCells.shift();
+    if (cell) {
+      placeOnBoard(piece, cell.col, cell.row);
+    } else {
+      placeInQueue(piece);
+    }
+  }
+
+  updateConnectedBorders();
+  updateStats();
+}
+
+function hasAnyCorrectNeighbor(piece) {
+  if (piece.parentElement !== board) return false;
+  if (isTopRowConnectionBlocked(piece)) return false;
+  const cell = getBoardCell(piece);
+  const sourceCol = Number(piece.dataset.col);
+  const sourceRow = Number(piece.dataset.row);
+  const directions = [
+    { dc: 1, dr: 0, sc: 1, sr: 0 },
+    { dc: -1, dr: 0, sc: -1, sr: 0 },
+    { dc: 0, dr: 1, sc: 0, sr: 1 },
+    { dc: 0, dr: -1, sc: 0, sr: -1 },
+  ];
+  return directions.some((direction) => {
+    const neighbor = findPieceAt(cell.col + direction.dc, cell.row + direction.dr, piece);
+    if (!neighbor || neighbor.dataset.sourceId !== piece.dataset.sourceId) return false;
+    if (isTopRowConnectionBlocked(piece, neighbor)) return false;
+    return (
+      Number(neighbor.dataset.col) === sourceCol + direction.sc &&
+      Number(neighbor.dataset.row) === sourceRow + direction.sr
+    );
+  });
+}
+
+function getConnectedPieceGroup(startPiece) {
+  const group = [];
+  const visited = new Set();
+  const queue = [startPiece];
+
+  while (queue.length) {
+    const piece = queue.shift();
+    if (visited.has(piece)) continue;
+    visited.add(piece);
+    group.push(piece);
+
+    for (const neighbor of getCorrectNeighbors(piece)) {
+      if (!visited.has(neighbor)) queue.push(neighbor);
+    }
+  }
+
+  return group;
+}
+
+function getCorrectNeighbors(piece) {
+  if (piece.parentElement !== board) return [];
+  if (isTopRowConnectionBlocked(piece)) return [];
+  const cell = getBoardCell(piece);
+  const sourceCol = Number(piece.dataset.col);
+  const sourceRow = Number(piece.dataset.row);
+  const directions = [
+    { dc: 1, dr: 0, sc: 1, sr: 0 },
+    { dc: -1, dr: 0, sc: -1, sr: 0 },
+    { dc: 0, dr: 1, sc: 0, sr: 1 },
+    { dc: 0, dr: -1, sc: 0, sr: -1 },
+  ];
+
+  return directions
+    .map((direction) => {
+      const neighbor = findPieceAt(cell.col + direction.dc, cell.row + direction.dr, piece);
+      if (!neighbor || neighbor.dataset.sourceId !== piece.dataset.sourceId) return null;
+      if (isTopRowConnectionBlocked(piece, neighbor)) return null;
+      const isCorrect =
+        Number(neighbor.dataset.col) === sourceCol + direction.sc &&
+        Number(neighbor.dataset.row) === sourceRow + direction.sr;
+      return isCorrect ? neighbor : null;
+    })
+    .filter(Boolean);
+}
+
+function shuffle(items) {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  return items;
+}
+
 function enterPlayMode() {
+  playSnapshot = createPlaySnapshot();
+  playSession++;
   isPlayMode = true;
   document.body.classList.add("play-mode");
   resolveCompletedPuzzles();
 }
 
 function exitPlayMode() {
+  playSession++;
   isPlayMode = false;
+  isResolving = false;
   document.body.classList.remove("play-mode");
+  restorePlaySnapshot();
 }
 
 async function resolveCompletedPuzzles() {
+  if (!isPlayMode) return;
   if (isResolving) return;
+  const session = playSession;
   isResolving = true;
   let completed = false;
   const sources = [...new Set(pieces.map((piece) => piece.dataset.sourceId))];
   for (const sourceId of sources) {
     const sourcePieces = pieces.filter((piece) => piece.dataset.sourceId === sourceId);
     if (!sourcePieces.length || sourcePieces.some((piece) => piece.parentElement !== board)) continue;
+    if (sourcePieces.some((piece) => isTopRowConnectionBlocked(piece))) continue;
 
     const placedCols = sourcePieces.map((piece) => Number(piece.dataset.boardCol));
     const placedRows = sourcePieces.map((piece) => Number(piece.dataset.boardRow));
@@ -519,6 +787,10 @@ async function resolveCompletedPuzzles() {
 
   if (completed) {
     await wait(1000);
+    if (!isPlayMode || session !== playSession) {
+      isResolving = false;
+      return;
+    }
     settleBoardGravity();
     isResolving = false;
     window.setTimeout(resolveCompletedPuzzles, 560);
@@ -533,12 +805,14 @@ async function resolveCompletedPuzzles() {
 }
 
 function removeCompletedPieces(completedPieces) {
+  const session = playSession;
   const completedSet = new Set(completedPieces);
   for (const piece of completedPieces) {
     piece.dataset.clearing = "true";
     piece.classList.add("clearing");
   }
   window.setTimeout(() => {
+    if (!isPlayMode || session !== playSession) return;
     for (const piece of completedPieces) piece.remove();
   }, 1000);
   pieces = pieces.filter((piece) => !completedSet.has(piece));
@@ -652,6 +926,7 @@ function updateConnectedBorders() {
     for (const direction of directions) {
       const neighbor = findPieceAt(cell.col + direction.boardCol, cell.row + direction.boardRow, piece);
       if (!neighbor || neighbor.dataset.sourceId !== piece.dataset.sourceId) continue;
+      if (isTopRowConnectionBlocked(piece, neighbor)) continue;
 
       const neighborSourceCol = Number(neighbor.dataset.col);
       const neighborSourceRow = Number(neighbor.dataset.row);
@@ -665,6 +940,195 @@ function updateConnectedBorders() {
       }
     }
   }
+}
+
+function createPlaySnapshot() {
+  return {
+    pieces: [...pieces],
+    trayOrder: [...tray.querySelectorAll(".piece")],
+    queueOrder: [...pieceQueue.querySelectorAll(".piece")],
+    boardPieces: [...board.querySelectorAll(".piece")].map((piece) => ({
+      piece,
+      col: Number(piece.dataset.boardCol),
+      row: Number(piece.dataset.boardRow),
+    })),
+  };
+}
+
+function restorePlaySnapshot() {
+  if (!playSnapshot) return;
+  pieces = [...playSnapshot.pieces];
+  tray.innerHTML = "";
+  board.innerHTML = "";
+  pieceQueue.innerHTML = "";
+
+  for (const piece of playSnapshot.trayOrder) returnToTray(piece);
+  for (const { piece, col, row } of playSnapshot.boardPieces) {
+    piece.classList.remove("clearing", "falling", "dragging");
+    delete piece.dataset.clearing;
+    placeOnBoard(piece, col, row);
+  }
+  for (const piece of playSnapshot.queueOrder) {
+    piece.classList.remove("clearing", "falling", "dragging");
+    delete piece.dataset.clearing;
+    placeInQueue(piece);
+  }
+
+  playSnapshot = null;
+  updateConnectedBorders();
+  updateStats();
+  updatePiecesEmptyState();
+}
+
+function exportJson() {
+  const data = {
+    version: 1,
+    pieceSize: { width: PIECE_W, height: PIECE_H },
+    board: {
+      cols: BOARD_COLS,
+      rows: BOARD_ROWS,
+      lockedRows: topRowLocked ? [0] : [],
+      expanded: !topRowLocked,
+      pieces: [...board.querySelectorAll(".piece")]
+        .map(serializePiece)
+        .sort((a, b) => a.board.row - b.board.row || a.board.col - b.board.col),
+    },
+    queue: {
+      pieces: [...pieceQueue.querySelectorAll(".piece")].map((piece, index) => ({
+        order: index,
+        ...serializePiece(piece),
+      })),
+    },
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "puzzle-layout.json";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function serializePiece(piece) {
+  const boardInfo = piece.parentElement === board
+    ? { col: Number(piece.dataset.boardCol), row: Number(piece.dataset.boardRow) }
+    : null;
+  return {
+    source: piece.dataset.source,
+    sourceId: piece.dataset.sourceId,
+    imageUrl: getPieceImageUrl(piece),
+    sourceGrid: {
+      cols: Number(piece.dataset.sourceCols),
+      rows: Number(piece.dataset.sourceRows),
+    },
+    original: {
+      col: Number(piece.dataset.col),
+      row: Number(piece.dataset.row),
+    },
+    board: boardInfo,
+  };
+}
+
+function getPieceImageUrl(piece) {
+  const inlineImage = piece.style.backgroundImage;
+  const match = inlineImage.match(/^url\(["']?(.*?)["']?\)$/);
+  return match ? match[1] : "";
+}
+
+function importJsonFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      importLevelData(data);
+    } catch (error) {
+      window.alert("导入失败：请选择有效的 Jason/JSON 文件。");
+    } finally {
+      importJsonInput.value = "";
+    }
+  };
+  reader.readAsText(file);
+}
+
+function importLevelData(data) {
+  const boardRecords = data?.board?.pieces || [];
+  const queueRecords = data?.queue?.pieces || [];
+  const existingImageUrls = new Map(
+    pieces.map((piece) => [`${piece.dataset.sourceId}:${piece.dataset.col}:${piece.dataset.row}`, getPieceImageUrl(piece)])
+  );
+  const importedPieces = [];
+
+  tray.innerHTML = "";
+  board.innerHTML = "";
+  pieceQueue.innerHTML = "";
+  pieces = [];
+  puzzleGroups = [];
+  isResolving = false;
+  topRowLocked = !(data?.board?.expanded || data?.board?.lockedRows?.length === 0);
+  board.classList.toggle("expanded", !topRowLocked);
+
+  for (const record of boardRecords) {
+    const piece = createPieceFromRecord(record, existingImageUrls);
+    importedPieces.push(piece);
+    placeOnBoard(piece, record.board.col, record.board.row);
+  }
+
+  for (const record of queueRecords) {
+    const piece = createPieceFromRecord(record, existingImageUrls);
+    importedPieces.push(piece);
+    placeInQueue(piece);
+  }
+
+  pieces = importedPieces;
+  rebuildPuzzleGroups();
+  updateConnectedBorders();
+  updateStats();
+  updatePiecesEmptyState();
+}
+
+function createPieceFromRecord(record, existingImageUrls) {
+  const sourceCols = Number(record.sourceGrid?.cols || 1);
+  const sourceRows = Number(record.sourceGrid?.rows || 1);
+  const sourceId = record.sourceId || `imported-${++sourceCount}`;
+  const col = Number(record.original?.col || 0);
+  const row = Number(record.original?.row || 0);
+  const imageUrl =
+    record.imageUrl ||
+    existingImageUrls.get(`${sourceId}:${col}:${row}`) ||
+    "";
+
+  if (!imageUrl) {
+    throw new Error("Missing image data");
+  }
+
+  const piece = makePiece({
+    imageUrl,
+    imageName: record.source || "imported",
+    sourceId,
+    sourceW: sourceCols * PIECE_W,
+    sourceH: sourceRows * PIECE_H,
+    col,
+    row,
+    cols: sourceCols,
+    rows: sourceRows,
+  });
+  piece.dataset.sourceCols = String(sourceCols);
+  piece.dataset.sourceRows = String(sourceRows);
+  return piece;
+}
+
+function rebuildPuzzleGroups() {
+  const groups = new Map();
+  for (const piece of pieces) {
+    const sourceId = piece.dataset.sourceId;
+    if (!groups.has(sourceId)) groups.set(sourceId, new Set());
+    groups.get(sourceId).add(`${piece.dataset.col}:${piece.dataset.row}`);
+  }
+  puzzleGroups = [...groups.entries()].map(([sourceId, cells]) => ({
+    sourceId,
+    pieceCount: cells.size,
+  }));
 }
 
 function resetAllPieces() {
@@ -706,8 +1170,12 @@ importAllImages.addEventListener("click", importAllUnusedImages);
 clearImages.addEventListener("click", clearImageLibrary);
 resetPieces.addEventListener("click", resetAllPieces);
 autoImportPieces.addEventListener("click", autoImportTrayPieces);
+expandBoardButton.addEventListener("click", expandBoard);
+refreshBoardButton.addEventListener("click", refreshBoard);
 playModeButton.addEventListener("click", enterPlayMode);
 exitPlayModeButton.addEventListener("click", exitPlayMode);
+exportJsonButton.addEventListener("click", exportJson);
+importJsonInput.addEventListener("change", () => importJsonFile(importJsonInput.files[0]));
 piecesPanel.addEventListener("dragover", handlePiecesDragOver);
 piecesPanel.addEventListener("drop", handlePiecesDrop);
 piecesPanel.addEventListener("dragleave", handlePiecesDragLeave);

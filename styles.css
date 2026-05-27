@@ -27,7 +27,8 @@ body.play-mode {
 }
 
 button,
-.import-button {
+.import-button,
+.import-json-button {
   height: 36px;
   border: 1px solid #cfd5df;
   border-radius: 8px;
@@ -40,7 +41,8 @@ button,
 }
 
 button:hover,
-.import-button:hover {
+.import-button:hover,
+.import-json-button:hover {
   border-color: var(--accent);
 }
 
@@ -53,12 +55,19 @@ button:hover,
   border-color: var(--accent);
 }
 
-.import-button input {
+.import-button input,
+.import-json-button input {
   position: absolute;
   width: 1px;
   height: 1px;
   opacity: 0;
   pointer-events: none;
+}
+
+.import-json-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .app {
@@ -243,7 +252,7 @@ button:hover,
 .workspace {
   position: relative;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   justify-items: center;
   align-items: center;
   overflow: auto;
@@ -253,8 +262,15 @@ button:hover,
 .board-actions {
   width: 100%;
   display: flex;
+  gap: 8px;
   justify-content: center;
   padding-bottom: 14px;
+}
+
+.board-actions-bottom {
+  display: none;
+  padding-top: 14px;
+  padding-bottom: 0;
 }
 
 .exit-play-button {
@@ -299,7 +315,15 @@ body.play-mode .exit-play-button {
   justify-content: center;
 }
 
-body.play-mode .board-actions {
+body.play-mode .board-actions:not(.board-actions-bottom) {
+  display: none;
+}
+
+body.play-mode .board-actions-bottom {
+  display: flex;
+}
+
+.board.expanded::after {
   display: none;
 }
 

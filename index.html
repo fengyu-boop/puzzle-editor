@@ -41,9 +41,18 @@
         <button id="exitPlayModeButton" class="exit-play-button" type="button">退出</button>
         <div class="board-actions">
           <button id="playModeButton" type="button">试玩</button>
+          <button id="exportJsonButton" type="button">导出Jason</button>
+          <label class="import-json-button">
+            <input id="importJsonInput" type="file" accept=".json,application/json" />
+            导入Jason
+          </label>
         </div>
         <div class="board-wrap">
           <div id="board" class="board" aria-label="6 x 6 拼图画布"></div>
+        </div>
+        <div class="board-actions board-actions-bottom">
+          <button id="expandBoardButton" type="button">扩展画布</button>
+          <button id="refreshBoardButton" type="button">刷新</button>
         </div>
       </section>
 
